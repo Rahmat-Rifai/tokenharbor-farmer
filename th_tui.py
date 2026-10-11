@@ -1,18 +1,15 @@
-#!/usr/bin/env python3
-"""th_tui.py — TokenHarbor Farmer Rich TUI (interactive menu, klik-klik 1/2/3).
-Menu visual pakai Rich. Panggil fungsi farm existing (th_tor_farm / th_auto_register).
-
-Run: python th_tui.py
-"""
-import os, sys, time, json
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.prompt import Prompt, IntPrompt
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich import box
+
+from config_loader import load_config
+from tor_manager import is_port_open, ensure_tor_running, rotate_tor_ip
+from th_auto_register import register_one
+from th_tor_farm import load_state, save_state, run_farm
+from inject_th_kv import inject_9router
+from th_preflight import run_preflight
 
 console = Console()
 
@@ -25,127 +22,82 @@ BANNER = """
     ██║   ╚██████╔╝██║  ██╗███████╗██║ ╚████║██║  ██║██║  ██║██║  ██║██║     ╚██████╔╝██║  ██║
     ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═════╝ ╚═╝  ╚═╝
 [/bold cyan]
-[bold green]TokenHarbor Farmer • Auto Register • Free Models • 9Router Inject[/bold green]
-[dim]Tor IP rotation • HTTP Only • Verified 100+ akun[/dim]
+[bold green]TokenHarbor Farmer • Free Models • 9Router Inject[/bold green]
+[dim]Tor IP rotation • Multi Email • DeepSeek V4.1 Flash Free[/dim]
 """
 
-def check_tor():
-    """Cek Tor hidup (9050)."""
-    import socket
-    try:
-        s = socket.create_connection(("127.0.0.1", 9050), timeout=3)
-        s.close()
-        return True
-    except Exception:
-        return False
 
 def main():
-    console.print(BANNER, justify="center")
-    console.print(Panel("[bold]💡 Status Tools[/bold]", box=box.ROUNDED))
-    tor_ok = check_tor()
-    console.print(f"  🔥 Tor (9050): {'[green]✅ READY[/green]' if tor_ok else '[red]❌ DOWN — jalankan tor.exe -f torrc[/red]'}")
-    # state count
-    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "th_tor_state.json")
-    try:
-        st = json.load(open(state_file))
-        console.print(f"  📦 Akun tersimpan: [cyan]{len(st.get('accounts', []))}[/cyan]")
-    except Exception:
-        console.print(f"  📦 Akun tersimpan: [yellow]0 (belum ada state)[/yellow]")
-    console.print()
-
     while True:
-        table = Table(title="[bold]📋 MENU[/bold]", box=box.DOUBLE_EDGE, style="cyan")
+        console.clear()
+        console.print(BANNER, justify="center")
+        cfg = load_config()
+        tor_ok = is_port_open(cfg.get("tor_socks_port", 9050))
+        state = load_state()
+
+        status_text = (
+            f"  🔥 Tor (9050): {'[green]READY[/green]' if tor_ok else '[yellow]STOPPED (auto-launch on farm)[/yellow]'}\n"
+            f"  ✉️ Email Provider: [cyan]{cfg.get('mail_provider')}[/cyan]\n"
+            f"  🔒 Model Lock: [magenta]{cfg.get('default_model')}[/magenta]\n"
+            f"  📦 Akun Tersimpan: [bold white]{len(state.get('accounts', []))}[/bold white]"
+        )
+        console.print(Panel(status_text, title="[bold]Status Sistem[/bold]", box=box.ROUNDED))
+
+        table = Table(title="[bold]MENU PILIHAN[/bold]", box=box.DOUBLE_EDGE, style="cyan")
         table.add_column("No", style="bold yellow", width=4)
         table.add_column("Aksi", style="bold white")
         table.add_column("Keterangan", style="dim")
-        rows = [
-            ("1", "Register 1 akun", "Signup + verify + consent + key + inject"),
-            ("2", "Batch Farm (N)", "Farm massal + auto inject + resume"),
-            ("3", "Loop register→logout", "Register, logout, ulang (N kali)"),
-            ("4", "Test API key", "Test key terhadap model free"),
-            ("5", "Enable Free Models", "Enable free models utk akun existing"),
-            ("6", "List Akun", "Lihat akun tersimpan"),
-            ("7", "Status 9Router", "Cek conn th + model free"),
-            ("0", "Exit", "Keluar"),
-        ]
-        for r in rows:
-            table.add_row(*r)
+        table.add_row("1", "Register 1 Akun", "Signup + verify + consent + key + inject 9Router")
+        table.add_row("2", "Batch Farm (N Akun)", "Farm massal otomatis dengan rotasi Tor IP")
+        table.add_row("3", "Preflight Check", "Diagnosa kelengkapan sistem, Tor, & DB 9Router")
+        table.add_row("4", "Rotasi Tor IP (Manual)", "Kirim signal NEWNYM ke Tor")
+        table.add_row("5", "Lihat Daftar Akun", "Tampilkan akun yang sudah tersimpan")
+        table.add_row("0", "Keluar", "Tutup aplikasi")
         console.print(table)
-        choice = Prompt.ask("[bold yellow]Pilih menu[/bold yellow]", choices=["0","1","2","3","4","5","6","7"], default="1")
 
-        if choice == "1":
-            console.print("[cyan]Register 1 akun...[/cyan]")
-            _import_and_run(["single"])
-        elif choice == "2":
-            n = IntPrompt.ask("[bold]Jumlah akun", default=10)
-            inject = Prompt.ask("Inject 9Router?", choices=["y","n"], default="y") == "y"
-            args = ["single"] if n == 1 else []
-            cmd = ["th_auto_register.py", "loop", str(n)]
-            if not inject:
-                cmd.append("--no-inject")
-            _run_script(cmd)
-        elif choice == "3":
-            n = IntPrompt.ask("[bold]Jumlah loop", default=5)
-            _run_script(["th_auto_register.py", "loop", str(n)])
-        elif choice == "4":
-            _run_script(["th_auto_register.py", "test"]) if _has_test else console.print("[red]Mode test: gunakan `python th_auto_register.py test`[/red]")
-        elif choice == "5":
-            console.print("[yellow]Masukkan email & password akun utk enable free models (via script) — atau gunakan farm ulang.[/yellow]")
-            _run_script(["th_auto_register.py", "single"])
-        elif choice == "6":
-            _list_accounts()
-        elif choice == "7":
-            _status_9router()
-        elif choice == "0":
-            console.print("[bold green]Bye! 👋[/bold green]")
+        pilihan = Prompt.ask("Pilih menu", choices=["1", "2", "3", "4", "5", "0"], default="1")
+        if pilihan == "0":
             break
+        elif pilihan == "1":
+            ensure_tor_running()
+            acct, err = register_one(cfg)
+            if acct:
+                console.print(f"[green]✓ Registrasi Berhasil![/green] {acct['email']}")
+                injected, msg = inject_9router(acct["api_key"], acct["email"], cfg)
+                console.print(f"9Router: {'[green]INJECTED[/green]' if injected else '[red]FAILED[/red]'} ({msg})")
+                acct["injected"] = injected
+                state["accounts"].append(acct)
+                save_state(state)
+            else:
+                console.print(f"[red]✗ Gagal:[/red] {err}")
+            Prompt.ask("\nTekan Enter untuk kembali")
+        elif pilihan == "2":
+            n = IntPrompt.ask("Jumlah akun target", default=5)
+            run_farm(n)
+            Prompt.ask("\nTekan Enter untuk kembali")
+        elif pilihan == "3":
+            run_preflight()
+            Prompt.ask("\nTekan Enter untuk kembali")
+        elif pilihan == "4":
+            ok = rotate_tor_ip()
+            console.print(f"Tor rotation: {'[green]SUCCESS[/green]' if ok else '[red]FAILED[/red]'}")
+            Prompt.ask("\nTekan Enter untuk kembali")
+        elif pilihan == "5":
+            t = Table(title="Akun Tersimpan")
+            t.add_column("Email", style="cyan")
+            t.add_column("API Key", style="dim")
+            t.add_column("Verified", style="green")
+            t.add_column("Injected", style="yellow")
+            for a in state.get("accounts", []):
+                t.add_row(
+                    a.get("email", ""),
+                    (a.get("api_key", "")[:18] + "...") if a.get("api_key") else "-",
+                    "Y" if a.get("verified") else "N",
+                    "Y" if a.get("injected") else "N",
+                )
+            console.print(t)
+            Prompt.ask("\nTekan Enter untuk kembali")
 
-def _import_and_run(args):
-    """Jalankan th_auto_register dgn arg."""
-    _run_script(["th_auto_register.py"] + args)
-
-def _run_script(cmd):
-    """Jalankan script subprocess + tampilkan output."""
-    import subprocess
-    base = os.path.dirname(os.path.abspath(__file__))
-    console.print(f"[dim]>>> python {' '.join(cmd)}[/dim]")
-    try:
-        r = subprocess.run([sys.executable] + cmd, cwd=base, timeout=3600)
-    except Exception as e:
-        console.print(f"[red]Error: {str(e)[:80]}[/red]")
-    input("\n[dim]Tekan Enter utk lanjut...[/dim]")
-
-def _list_accounts():
-    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "th_tor_state.json")
-    try:
-        st = json.load(open(state_file))
-        accts = st.get("accounts", [])
-        table = Table(title=f"[bold]Akun ({len(accts)})[/bold]", box=box.SIMPLE)
-        table.add_column("#", style="dim")
-        table.add_column("Email", style="cyan")
-        table.add_column("Verified", style="green")
-        table.add_column("Consent", style="green")
-        table.add_column("Key", style="yellow")
-        for i, a in enumerate(accts[-20:], 1):
-            table.add_row(str(i), a.get("email","")[:30], "✅" if a.get("verified") else "❌",
-                          "✅" if a.get("consent") else "❌", (a.get("api_key","")[:25]+"..."))
-        console.print(table)
-    except Exception as e:
-        console.print(f"[red]State error: {str(e)[:60]}[/red]")
-    input("\n[dim]Tekan Enter utk lanjut...[/dim]")
-
-def _status_9router():
-    import sqlite3, db_path
-    db = db_path.find_9router_db()
-    try:
-        c = sqlite3.connect(db)
-        n = c.execute("SELECT COUNT(*) FROM providerConnections WHERE data LIKE '%tokenharbor.ai%' AND isActive=1").fetchone()[0]
-        c.close()
-        console.print(f"  🔌 Conn th active: [green]{n}[/green]")
-        console.print(f"  🧠 Model free: [cyan]th/mimo-v2.5:free, th/deepseek-v4-flash:free, th/qwen3.8-27b:free[/cyan]")
-    except Exception as e:
-        console.print(f"[red]DB error: {str(e)[:60]}[/red]")
-    input("\n[dim]Tekan Enter utk lanjut...[/dim]")
 
 if __name__ == "__main__":
     main()

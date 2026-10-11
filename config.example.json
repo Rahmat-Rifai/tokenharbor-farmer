@@ -1,0 +1,19 @@
+{
+  "mail_provider": "gmail_catchall",
+  "gmail_address": "",
+  "gmail_app_password": "",
+  "domain": "arxpays.my.id",
+  "tempik_api": "https://tempik.meowx.web.id",
+  "tempik_dom": "meowx.web.id",
+  "tor_socks_port": 9050,
+  "tor_control_port": 9051,
+  "r9_url": "http://localhost:20128",
+  "r9_pass": "123456",
+  "install_9r": true,
+  "default_model": "deepseek-v4.1-flash:free",
+  "model_locks": [
+    "deepseek-v4.1-flash:free",
+    "mimo-v2.5:free",
+    "qwen3.8-27b:free"
+  ]
+}

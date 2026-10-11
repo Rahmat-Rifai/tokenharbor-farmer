@@ -1,86 +1,91 @@
-#!/usr/bin/env python3
-"""th_preflight.py — Pre-flight check sebelum farm. Deteksi error lebih awal.
-Cek: Python deps, Tor (9050+9051), env DB, state validity, 9router reachable.
-Exit 0 = OK siap farm, exit 1 = ada masalah (tampilkan fix).
-"""
-import os, sys, json, socket, sqlite3, db_path
+import os
+import sys
+import sqlite3
 
-def check(ok, msg, fix=""):
-    tag = "✅" if ok else "❌"
-    print(f"  {tag} {msg}")
-    if not ok and fix:
-        print(f"     → Fix: {fix}")
-    return ok
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-def main():
-    print("=== TOKENHARBOR FARMER — PRE-FLIGHT CHECK ===\n")
-    all_ok = True
-    here = os.path.dirname(os.path.abspath(__file__))
+from config_loader import load_config
+import db_path
+import tor_manager
+from mail_clients import get_mail_client
 
-    # 1. Python deps
-    print("[1] Dependencies")
-    deps = [("requests", "requests"), ("pysocks", "socks"), ("rich", "rich")]
-    for name, mod in deps:
+
+def check_dependencies(deps: list[str]) -> tuple[bool, list[str]]:
+    missing = []
+    for d in deps:
         try:
-            __import__(mod)
-            all_ok &= check(True, f"{name} ✓")
+            __import__(d)
         except ImportError:
-            all_ok &= check(False, f"{name} TIDAK ada", f"pip install {name}")
-    print()
+            missing.append(d)
+    return len(missing) == 0, missing
 
-    # 2. Tor
-    print("[2] Tor")
-    def _port_open(p):
+
+def run_preflight() -> bool:
+    print("\n=== TOKENHARBOR FARMER — PREFLIGHT CHECK ===")
+    cfg = load_config()
+    all_ok = True
+
+    # 1. Dependencies
+    ok_deps, missing = check_dependencies(["requests", "socks", "rich"])
+    tag = "✅" if ok_deps else "❌"
+    print(f"  {tag} Python Dependencies: {', '.join(missing) if missing else 'All OK'}")
+    all_ok &= ok_deps
+
+    # 2. Tor ports
+    socks_port = cfg.get("tor_socks_port", 9050)
+    ctrl_port = cfg.get("tor_control_port", 9051)
+    socks_ok = tor_manager.is_port_open(socks_port)
+    ctrl_ok = tor_manager.is_port_open(ctrl_port)
+    tag_tor = "✅" if socks_ok else "⚠️"
+    print(f"  {tag_tor} Tor Socks {socks_port}: {'Ready' if socks_ok else 'Not started (will auto-start)'}")
+    tag_ctrl = "✅" if ctrl_ok else "⚠️"
+    print(f"  {tag_ctrl} Tor Control {ctrl_port}: {'Ready' if ctrl_ok else 'Not started (will auto-start)'}")
+
+    # 3. 9Router DB
+    r9_db = db_path.find_9router_db()
+    db_exists = os.path.exists(r9_db)
+    db_readable = False
+    if db_exists:
         try:
-            s = socket.create_connection(("127.0.0.1", p), timeout=3)
-            s.close()
-            return True
+            conn = sqlite3.connect(f"file:{r9_db}?mode=ro", uri=True)
+            conn.execute("SELECT 1")
+            conn.close()
+            db_readable = True
         except Exception:
-            return False
-    socks = _port_open(9050)
-    ctrl = _port_open(9051)
-    all_ok &= check(socks, "Socks 9050 (proxy)", "jalankan: tor -f torrc")
-    all_ok &= check(ctrl, "Control 9051 (rotation)", "tambah ControlPort 9051 di torrc")
-    print()
-
-    # 3. State
-    print("[3] State")
-    state_file = os.path.join(here, "th_tor_state.json")
-    if os.path.exists(state_file):
-        try:
-            st = json.load(open(state_file))
-            n = len(st.get("accounts", []))
-            all_ok &= check(True, f"State valid — {n} akun tersimpan")
-        except Exception as e:
-            all_ok &= check(False, f"State rusak: {str(e)[:50]}", "hapus/backup th_tor_state.json")
+            db_readable = False
+            all_ok = False
     else:
-        all_ok &= check(True, "Belum ada state (fresh start — OK)")
-    print()
+        all_ok = False
 
-    # 4. 9Router DB
-    print("[4] 9Router DB")
-    db = db_path.find_9router_db()
-    if os.path.exists(db):
-        try:
-            c = sqlite3.connect(db)
-            n = c.execute("SELECT COUNT(*) FROM providerConnections WHERE data LIKE '%tokenharbor.ai%'").fetchone()[0]
-            c.close()
-            all_ok &= check(True, f"DB OK — {n} conn tokenharbor")
-        except Exception as e:
-            all_ok &= check(False, f"DB error: {str(e)[:50]}")
-    else:
-        all_ok &= check(False, f"DB tidak ditemukan: {db}", "set NINE_ROUTER_DB atau jalankan --no-inject")
-    print()
+    tag_db = "✅" if (db_exists and db_readable) else "❌"
+    db_status = "Found & Readable" if (db_exists and db_readable) else ("Unreadable" if db_exists else "Not found")
+    print(f"  {tag_db} 9Router SQLite DB: {r9_db} ({db_status})")
 
-    print("=" * 50)
-    if all_ok:
-        print("  ✅ SEMUA OK — siap farm!")
-        print("  Jalankan: python th_tui.py  (menu visual)")
-        print("        atau  python th_tor_farm.py 100")
-    else:
-        print("  ⚠️ ADA MASALAH — perbaiki di atas sebelum farm")
-    print("=" * 50)
-    return 0 if all_ok else 1
+    # 4. Email provider & IMAP connectivity
+    mail_prov = cfg.get("mail_provider", "gmail_catchall")
+    print(f"  ✅ Email Provider: {mail_prov}")
+    try:
+        mail_client = get_mail_client(cfg)
+        if hasattr(mail_client, "test_connection") and callable(getattr(mail_client, "test_connection")):
+            imap_ok, imap_msg = mail_client.test_connection()
+            if imap_ok:
+                print("  ✅ Email IMAP: Connected")
+            else:
+                print(f"  ❌ Email IMAP: Failed ({imap_msg})")
+                all_ok = False
+    except Exception as e:
+        print(f"  ❌ Email IMAP: Failed ({e})")
+        all_ok = False
+
+    print()
+    return bool(all_ok)
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    ok = run_preflight()
+    sys.exit(0 if ok else 1)
